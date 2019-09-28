@@ -29,4 +29,5 @@ import (
 	// please ask on github.com/minio/minio/issues before changing this.
 	_ "github.com/minio/minio/cmd/gateway/b2"
 	// Add your gateway here.
+	_ "github.com/chrsch/minio/cmd/gateway/sia"
 )
