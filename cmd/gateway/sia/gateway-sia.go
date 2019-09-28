@@ -755,7 +755,7 @@ func (s *siaObjects) updateFileCacheMetaAfterUploadedToSia(tempFile string, buck
 		var err error
 		soi, err = s.findSiaObject(bucket, object)
 		if err != nil {
-			logger.FatalIf(err, "Unable to find file uploaded to Sia path %s/%s", bucket, object)
+			logger.Info("Unable to find file uploaded to Sia path %s/%s", bucket, object)
 			break
 		}
 
