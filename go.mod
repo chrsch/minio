@@ -88,3 +88,5 @@ replace github.com/eapache/queue => github.com/eapache/queue v1.1.0
 replace github.com/mattn/go-runewidth => github.com/mattn/go-runewidth v0.0.4
 
 replace github.com/mitchellh/mapstructure => github.com/mitchellh/mapstructure v1.1.2
+
+replace github.com/minio/minio/cmd/gateway/sia => github.com/chrsch/minio/cmd/gateway/sia v0.0.1
