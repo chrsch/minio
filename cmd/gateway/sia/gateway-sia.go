@@ -17,6 +17,7 @@
 package sia
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -215,7 +216,7 @@ func non2xx(code int) bool {
 
 // decodeError returns the api.Error from a API response. This method should
 // only be called if the response's status code is non-2xx. The error returned
-// may not be of type api.Error in the event of an error unmarshalling the
+// may not be of type api.Error in the event of an error un-marshalling the
 // JSON.
 type siaError struct {
 	// Message describes the error in English. Typically it is set to
@@ -332,6 +333,21 @@ func list(addr string, apiPassword string, obj *renterFiles) error {
 	return json.NewDecoder(resp.Body).Decode(obj)
 }
 
+// Get the info of given sia object, decodes the json response.
+func getSiaObjectInfo(addr string, apiPassword string, siaObj string, obj *renterFileInfo) error {
+	resp, err := apiGet(addr, "/renter/file/"+siaObj, apiPassword)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent {
+		return fmt.Errorf("Expecting a response, but API returned %s", resp.Status)
+	}
+
+	return json.NewDecoder(resp.Body).Decode(obj)
+}
+
 // List the directories starting at the given directory
 func listDirs(addr string, apiPassword string, startDirectory string, obj *renterDirectories) error {
 	resp, err := apiGet(addr, "/renter/dir/"+startDirectory, apiPassword)
@@ -348,7 +364,7 @@ func listDirs(addr string, apiPassword string, startDirectory string, obj *rente
 }
 
 // get makes an API call and discards the response. An error is returned if the
-// responsee status is not 2xx.
+// response status is not 2xx.
 func get(addr, call, apiPassword string) error {
 	resp, err := apiGet(addr, call, apiPassword)
 	if err != nil {
@@ -562,6 +578,24 @@ func (s *siaObjects) GetObject(ctx context.Context, bucket string, object string
 	return err
 }
 
+func (s *siaObjects) getSiaObjectInfo(bucket, object string) (siaObjectFileInfo, error) {
+	// This is not needed probably but supports minio s3 behavior where / as a suffix means list directory.
+	if strings.HasSuffix(object, "/") {
+		return siaObjectFileInfo{}, minio.ObjectNotFound{
+			Bucket: bucket,
+			Object: object,
+		}
+	}
+
+	siaObj := path.Join(s.RootDir, bucket, object)
+	s.getRenterFileInfo(bucket, siaObj)
+
+	return siaObjectFileInfo{}, minio.ObjectNotFound{
+		Bucket: bucket,
+		Object: object,
+	}
+}
+
 // findSiaObject retrieves the siaObjectInfo for the Sia object with the given
 // Sia path name.
 func (s *siaObjects) findSiaObject(bucket, object string) (siaObjectFileInfo, error) {
@@ -636,41 +670,67 @@ func (s *siaObjects) GetObjectNInfo(ctx context.Context, bucket, object string, 
 
 // PutObject creates a new object with the incoming data,
 func (s *siaObjects) PutObject(ctx context.Context, bucket string, object string, r *minio.PutObjReader, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
-	// Some S3 clients first put a file with size of 0 and afterwards put the same file with real size. For now ignore 0 size uploads.
-	data := r.Reader
-	if data.Size() == 0 {
-		return objInfo, nil
-	}
+	pr, pw := io.Pipe()
+	bufferin := bufio.NewReader(r.Reader)
+	siaObj := path.Join(s.RootDir, bucket, object)
 
-	fileHash := xhashes.SHA256(path.Join(s.RootDir, bucket, object))
-	srcFile := path.Join(s.TempDir, fmt.Sprint(fileHash))
-	writer, err := os.Create(srcFile)
+	go func(objReader *bufio.Reader) {
+		// close the writer, so the reader knows there's no more data
+		defer pw.Close()
+
+		// write data to the pipe writer
+		bufferin.WriteTo(pw)
+	}(bufferin)
+
+	req, err := http.NewRequest("POST", "http://"+s.Address+"/renter/uploadstream/"+siaObj, pr)
+	if err != nil {
+		return objInfo, err
+	}
+	req.Header.Set("User-Agent", "Sia-Agent")
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if s.password != "" {
+		req.SetBasicAuth("", s.password)
+	}
+	c := http.Client{}
+	resp, err := c.Do(req)
 	if err != nil {
 		return objInfo, err
 	}
 
-	wsize, err := io.CopyN(writer, data, data.Size())
-	if err != nil {
-		os.Remove(srcFile)
+	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
+		return objInfo, MethodNotSupported{"/renter/uploadstream/" + siaObj}
+	}
+
+	if non2xx(resp.StatusCode) {
+		err := decodeError(resp)
+		resp.Body.Close()
 		return objInfo, err
 	}
 
-	if err = post(s.Address, "/renter/upload/"+path.Join(s.RootDir, bucket, object), "source="+srcFile, s.password); err != nil {
-		os.Remove(srcFile)
-		return objInfo, err
+	// We want to make sure once the uploading client receives request successfull the file is available from Sia.
+	// So let's wait for the file to become available after upload stream has finished which should happen
+	// within a view moments on a Sia node with good internet bandwidth. With further development of the Sia
+	// technology this should be even faster.
+	for {
+		siaObjInfo, _ := s.getRenterFileInfo(bucket, siaObj)
+		// If the sia path is empty probably upload was canceled.
+		if siaObjInfo.FileInfo.SiaPath == "" {
+			break
+		}
+		// If the file is available on the sia network stop waiting.
+		if siaObjInfo.FileInfo.Available == true {
+			break
+		}
+
+		time.Sleep(time.Second * 3)
 	}
-	// set key to 0 indicating it is uploading and must not deleted from cache
-	redisErr := s.RedisClient.Set(path.Join(s.RootDir, bucket, object), 0, 0).Err()
-	if redisErr != nil {
-		panic(redisErr)
-	}
-	go s.updateFileCacheMetaAfterUploadedToSia(srcFile, bucket, object)
 
 	return minio.ObjectInfo{
 		Name:    object,
 		Bucket:  bucket,
 		ModTime: time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
-		Size:    wsize,
+		Size:    r.Reader.Size(),
 		ETag:    minio.GenETag(),
 	}, nil
 }
@@ -722,6 +782,10 @@ type renterFiles struct {
 	Files []siaObjectFileInfo `json:"files"`
 }
 
+type renterFileInfo struct {
+	FileInfo siaObjectFileInfo `json:"file"`
+}
+
 type renterDirectories struct {
 	Directories []siaObjectDirectoryInfo `json:"directories"`
 }
@@ -749,6 +813,15 @@ func (s *siaObjects) listRenterFiles(bucket string) (siaObjs []siaObjectFileInfo
 	}
 
 	return siaObjs, nil
+}
+
+// getRenterFileInfo will return a info of an existing object in the bucket provided
+func (s *siaObjects) getRenterFileInfo(bucket, siaObj string) (siaObjFileInfo renterFileInfo, err error) {
+	if err = getSiaObjectInfo(s.Address, s.password, siaObj, &siaObjFileInfo); err != nil {
+		return siaObjFileInfo, err
+	}
+
+	return siaObjFileInfo, nil
 }
 
 // listRenterDirectories will return a list of existing directories starting from the directory provided
