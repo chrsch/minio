@@ -622,13 +622,13 @@ func (s *siaObjects) PutObject(ctx context.Context, bucket string, object string
 	bufferin := bufio.NewReader(r.Reader)
 	siaObj := path.Join(s.RootDir, bucket, object)
 
-	go func(objReader *bufio.Reader) {
+	go func() {
 		// close the writer, so the reader knows there's no more data
 		defer pw.Close()
 
 		// write data to the pipe writer
 		bufferin.WriteTo(pw)
-	}(bufferin)
+	}()
 
 	req, err := http.NewRequest("POST", "http://"+s.Address+"/renter/uploadstream/"+siaObj, pr)
 	if err != nil {
