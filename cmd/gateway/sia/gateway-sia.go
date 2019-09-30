@@ -450,6 +450,13 @@ func (s *siaObjects) ListObjects(ctx context.Context, bucket string, prefix stri
 }
 
 func (s *siaObjects) GetObject(ctx context.Context, bucket string, object string, startOffset int64, length int64, writer io.Writer, etag string, opts minio.ObjectOptions) error {
+	// startOffset other than 0 not supported right now by Sia API
+	if startOffset != 0 {
+		return minio.InvalidRange{
+			OffsetBegin: startOffset,
+			OffsetEnd:   length,
+		}
+	}
 	pr, pw := io.Pipe()
 	siaObj := path.Join(s.RootDir, bucket, object)
 
