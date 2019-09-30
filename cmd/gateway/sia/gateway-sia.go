@@ -25,14 +25,11 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/shomali11/util/xhashes"
 
 	"github.com/fatih/color"
 	"github.com/minio/cli"
@@ -351,15 +348,7 @@ func (s *siaObjects) MakeBucketWithLocation(ctx context.Context, bucket, locatio
 
 // GetBucketInfo gets bucket metadata.
 func (s *siaObjects) GetBucketInfo(ctx context.Context, bucket string) (bi minio.BucketInfo, err error) {
-	fileHash := xhashes.SHA256(path.Join(s.RootDir, bucket, ""))
-	dstFile := path.Join(s.TempDir, fmt.Sprint(fileHash))
-	var siaObj = path.Join(s.RootDir, bucket, fileHash)
-
-	defer os.Remove(dstFile)
-
-	if err := get(s.Address, "/renter/download/"+siaObj+"?destination="+url.QueryEscape(dstFile), s.password); err != nil {
-		return bi, err
-	}
+	// TODO (chrsch) Receive directory metadata for dir representing the bucket. For now return name only.
 	return minio.BucketInfo{Name: bucket}, nil
 }
 
