@@ -32,7 +32,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis"
 	"github.com/shomali11/util/xhashes"
 
 	"github.com/fatih/color"
@@ -47,16 +46,12 @@ const (
 	siaBackend = "sia"
 )
 
-type fileCacheMeta struct {
-	RedisClient string
-}
 type siaObjects struct {
 	minio.GatewayUnsupported
-	Address     string // Address and port of Sia Daemon.
-	TempDir     string // Temporary storage location for file transfers.
-	RootDir     string // Root directory to store files on Sia.
-	password    string // Sia password for uploading content in authenticated manner.
-	RedisClient *redis.Client
+	Address  string // Address and port of Sia Daemon.
+	TempDir  string // Temporary storage location for file transfers.
+	RootDir  string // Root directory to store files on Sia.
+	password string // Sia password for uploading content in authenticated manner.
 }
 
 func init() {
@@ -118,33 +113,6 @@ func (g *Sia) Name() string {
 	return siaBackend
 }
 
-func (s *siaObjects) listenToRedisPubSub(channel string) {
-	pubsub := s.RedisClient.PSubscribe(channel)
-	defer pubsub.Close()
-
-	for {
-		msgi, err := pubsub.Receive()
-		if err != nil {
-			fmt.Println(nil, "PubSub error:", err.Error())
-			return
-		}
-		switch msg := msgi.(type) {
-		case *redis.Message:
-			fmt.Println(nil, "Received", msg.Payload, "on channel", msg.Channel)
-			if strings.Compare("expired", msg.Payload) == 0 {
-				go func() {
-					file := strings.Split(msg.Channel, ":")[1]
-					fileHash := xhashes.SHA256(file)
-					dstFile := path.Join(s.TempDir, fmt.Sprint(fileHash))
-					os.Remove(dstFile)
-				}()
-			}
-		default:
-			fmt.Println(nil, "Got control message", msg)
-		}
-	}
-}
-
 // NewGatewayLayer returns Sia gateway layer, implements GatewayLayer interface to
 // talk to Sia backend.
 func (g *Sia) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error) {
@@ -155,21 +123,6 @@ func (g *Sia) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error)
 		RootDir:  creds.AccessKey,
 		TempDir:  os.Getenv("SIA_TEMP_DIR"),
 		password: os.Getenv("SIA_API_PASSWORD"),
-		RedisClient: redis.NewClient(&redis.Options{
-			Addr:     "127.0.0.1:6379",
-			Password: "", // no password set
-			DB:       0,  // use default DB
-		}),
-	}
-
-	//go sia.listenToRedisPubSub("*")
-	go sia.listenToRedisPubSub("__keyspace@0__:" + creds.AccessKey + "/*")
-
-	var err error
-	// Check if redis is available
-	_, err = sia.RedisClient.Ping().Result()
-	if err != nil {
-		return nil, err
 	}
 
 	// If Address not provided on command line or ENV, default to:
@@ -182,6 +135,7 @@ func (g *Sia) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error)
 		sia.TempDir = ".sia_temp"
 	}
 
+	var err error
 	sia.TempDir, err = filepath.Abs(sia.TempDir)
 	if err != nil {
 		return nil, err
@@ -685,15 +639,6 @@ func (s *siaObjects) PutObject(ctx context.Context, bucket string, object string
 
 // DeleteObject deletes a blob in bucket
 func (s *siaObjects) DeleteObject(ctx context.Context, bucket string, object string) error {
-	fileHash := xhashes.SHA256(path.Join(s.RootDir, bucket, object))
-	objectFile := path.Join(s.TempDir, fmt.Sprint(fileHash))
-	defer os.Remove(objectFile)
-
-	redisErr := s.RedisClient.Del(path.Join(s.RootDir, bucket, object)).Err()
-	if redisErr != nil {
-		panic(redisErr)
-	}
-
 	// Tell Sia daemon to delete the object
 	var siaObj = path.Join(s.RootDir, bucket, object)
 	return post(s.Address, "/renter/delete/"+siaObj, "", s.password)
@@ -785,38 +730,4 @@ func (s *siaObjects) listRenterDirectories(startDirectory string) (siaObjs []sia
 	}
 
 	return siaObjs, nil
-}
-
-// updateFileCacheMetaAfterUploadedToSia checks the status of a Sia file upload
-// until it reaches 100% upload progress, then deletes the local temp copy from
-// the filesystem.
-func (s *siaObjects) updateFileCacheMetaAfterUploadedToSia(tempFile string, bucket, object string) {
-	var soi siaObjectFileInfo
-	// Wait until 100% upload instead of 1x redundancy because if we delete
-	// after 1x redundancy, the user has to pay the cost of other hosts
-	// redistributing the file.
-
-	for soi.UploadProgress < 100.0 {
-		var err error
-		soi, err = s.findSiaObject(bucket, object)
-		if err != nil {
-			logger.Info("Unable to find file uploaded to Sia path %s/%s", bucket, object)
-			break
-		}
-
-		// Sleep between each check so that we're not hammering
-		// the Sia daemon with requests.
-		time.Sleep(15 * time.Second)
-	}
-
-	// set key to 1 indicating it is uploaded and it is safe o delete it from cache
-	// File is available in cache, update or create file cache meta info
-	_, err := s.RedisClient.Get(path.Join(s.RootDir, bucket, object)).Result()
-	// Check if key exists if not upload probably was canceled. Do nothing in this case.
-	if err != redis.Nil || err == nil {
-		redisErr := s.RedisClient.Set(path.Join(s.RootDir, bucket, object), 1, time.Hour*24*7).Err()
-		if redisErr != nil {
-			panic(redisErr)
-		}
-	}
 }
