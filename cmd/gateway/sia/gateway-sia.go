@@ -29,14 +29,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-redis/redis"
 	"github.com/shomali11/util/xhashes"
 
-	humanize "github.com/dustin/go-humanize"
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	minio "github.com/minio/minio/cmd"
@@ -484,96 +482,46 @@ func (s *siaObjects) ListObjects(ctx context.Context, bucket string, prefix stri
 }
 
 func (s *siaObjects) GetObject(ctx context.Context, bucket string, object string, startOffset int64, length int64, writer io.Writer, etag string, opts minio.ObjectOptions) error {
-	fileHash := xhashes.SHA256(path.Join(s.RootDir, bucket, object))
-	dstFile := path.Join(s.TempDir, fmt.Sprint(fileHash))
+	pr, pw := io.Pipe()
+	siaObj := path.Join(s.RootDir, bucket, object)
 
-	reader, err := os.Open(dstFile)
-	// If file is available but size is 0 download is running
-	if err == nil {
-		stat, _ := reader.Stat()
-		if stat.Size() == 0 {
-			return nil //Just return do nothing
-		}
-	}
-
-	if err != nil { // There was an error opening the file so download it
-		redisErr := s.RedisClient.Set(path.Join(s.RootDir, bucket, object), 0, 0).Err()
-		if redisErr != nil {
-			panic(redisErr)
-		}
-		var siaObj = path.Join(s.RootDir, bucket, object)
-		if err := get(s.Address, "/renter/download/"+siaObj+"?destination="+url.QueryEscape(dstFile), s.password); err != nil {
-			s.RedisClient.Del(path.Join(s.RootDir, bucket, object))
-			return err
-		}
-		// set key to 1 indicating it is safe to delete file from cache
-		redisErr = s.RedisClient.Set(path.Join(s.RootDir, bucket, object), 1, time.Hour*24*7).Err()
-		if redisErr != nil {
-			panic(redisErr)
-		}
-	} else {
-		// File is available in cache, update file cache meta
-		val, err := s.RedisClient.Get(path.Join(s.RootDir, bucket, object)).Result()
-		if err == redis.Nil {
-			redisErr := s.RedisClient.Set(path.Join(s.RootDir, bucket, object), 1, time.Hour*24*7).Err()
-			if redisErr != nil {
-				panic(redisErr)
-			}
-		} else {
-			intVal, _ := strconv.Atoi(val)
-			if intVal != 0 {
-				// set key to 1 indicating it is safe to delete file from cache
-				redisErr := s.RedisClient.Set(path.Join(s.RootDir, bucket, object), 1, time.Hour*24*7).Err()
-				if redisErr != nil {
-					panic(redisErr)
-				}
-			} else {
-				// set key to 0 indicating it is not safe to delete file from cache
-				redisErr := s.RedisClient.Set(path.Join(s.RootDir, bucket, object), 0, 0).Err()
-				if redisErr != nil {
-					panic(redisErr)
-				}
-			}
-		}
-	}
-
-	reader, err = os.Open(dstFile)
+	req, err := http.NewRequest("GET", "http://"+s.Address+"/renter/stream/"+siaObj, nil)
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
-	st, err := reader.Stat()
+	req.Header.Set("User-Agent", "Sia-Agent")
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if s.password != "" {
+		req.SetBasicAuth("", s.password)
+	}
+
+	c := http.Client{}
+	resp, err := c.Do(req)
 	if err != nil {
 		return err
 	}
-	size := st.Size()
-	if _, err = reader.Seek(startOffset, os.SEEK_SET); err != nil {
+
+	bufferIn := bufio.NewReader(resp.Body)
+	go func() {
+		// close the writer, so the reader knows there's no more data
+		defer pw.Close()
+
+		// write data to the pipe writer
+		bufferIn.WriteTo(pw)
+	}()
+
+	_, err = io.Copy(writer, pr)
+
+	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
+		return MethodNotSupported{"/renter/stream/" + siaObj}
+	}
+
+	if non2xx(resp.StatusCode) {
+		err := decodeError(resp)
+		resp.Body.Close()
 		return err
 	}
-
-	// For negative length we read everything.
-	if length < 0 {
-		length = size - startOffset
-	}
-
-	bufSize := int64(1 * humanize.MiByte)
-	if bufSize > length {
-		bufSize = length
-	}
-
-	// Reply back invalid range if the input offset and length fall out of range.
-	if startOffset > size || startOffset+length > size {
-		return minio.InvalidRange{
-			OffsetBegin:  startOffset,
-			OffsetEnd:    length,
-			ResourceSize: size,
-		}
-	}
-
-	// Allocate a staging buffer.
-	buf := make([]byte, int(bufSize))
-
-	_, err = io.CopyBuffer(writer, io.LimitReader(reader, length), buf)
 
 	return err
 }
