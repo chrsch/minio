@@ -36,6 +36,8 @@ import (
 	minio "github.com/minio/minio/cmd"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/auth"
+	"github.com/minio/minio/pkg/policy"
+	"github.com/minio/minio/pkg/policy/condition"
 	"github.com/minio/sha256-simd"
 )
 
@@ -350,6 +352,29 @@ func (s *siaObjects) MakeBucketWithLocation(ctx context.Context, bucket, locatio
 func (s *siaObjects) GetBucketInfo(ctx context.Context, bucket string) (bi minio.BucketInfo, err error) {
 	// TODO (chrsch) Receive directory metadata for dir representing the bucket. For now return name only.
 	return minio.BucketInfo{Name: bucket}, nil
+}
+
+// GetBucketPolicy - Sia doesn't implement any policies so return allow all
+func (s *siaObjects) GetBucketPolicy(ctx context.Context, bucket string) (*policy.Policy, error) {
+	return &policy.Policy{
+		Version: policy.DefaultVersion,
+		Statements: []policy.Statement{
+			policy.NewStatement(
+				policy.Allow,
+				policy.NewPrincipal("*"),
+				policy.NewActionSet(
+					policy.GetBucketLocationAction,
+					policy.ListBucketAction,
+					policy.GetObjectAction,
+				),
+				policy.NewResourceSet(
+					policy.NewResource(bucket, ""),
+					policy.NewResource(bucket, "*"),
+				),
+				condition.NewFunctions(),
+			),
+		},
+	}, nil
 }
 
 // ListBuckets will detect and return existing buckets on Sia.
