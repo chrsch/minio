@@ -571,19 +571,9 @@ func (s *siaObjects) GetObjectNInfo(ctx context.Context, bucket, object string, 
 
 // PutObject creates a new object with the incoming data,
 func (s *siaObjects) PutObject(ctx context.Context, bucket string, object string, r *minio.PutObjReader, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
-	pr, pw := io.Pipe()
-	bufferin := bufio.NewReader(r.Reader)
 	siaObj := path.Join(s.RootDir, bucket, object)
 
-	go func() {
-		// close the writer, so the reader knows there's no more data
-		defer pw.Close()
-
-		// write data to the pipe writer
-		bufferin.WriteTo(pw)
-	}()
-
-	req, err := http.NewRequest("POST", "http://"+s.Address+"/renter/uploadstream/"+siaObj, pr)
+	req, err := http.NewRequest("POST", "http://"+s.Address+"/renter/uploadstream/"+siaObj, r.Reader)
 	if err != nil {
 		return objInfo, err
 	}
@@ -592,6 +582,7 @@ func (s *siaObjects) PutObject(ctx context.Context, bucket string, object string
 	if s.password != "" {
 		req.SetBasicAuth("", s.password)
 	}
+
 	c := http.Client{}
 	resp, err := c.Do(req)
 	if err != nil {
