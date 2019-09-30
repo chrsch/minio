@@ -27,7 +27,6 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -48,7 +47,6 @@ const (
 type siaObjects struct {
 	minio.GatewayUnsupported
 	Address  string // Address and port of Sia Daemon.
-	TempDir  string // Temporary storage location for file transfers.
 	RootDir  string // Root directory to store files on Sia.
 	password string // Sia password for uploading content in authenticated manner.
 }
@@ -73,8 +71,7 @@ func init() {
  
    UPDATE:
 	  MINIO_UPDATE: To turn off in-place upgrades, set this value to "off".
- 
-   SIA_TEMP_DIR:        The name of the local Sia temporary storage directory. (.sia_temp)
+
    SIA_API_PASSWORD:    API password for Sia daemon. (default is empty)
  
  EXAMPLES:
@@ -120,7 +117,6 @@ func (g *Sia) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error)
 		// RootDir uses access key directly, provides partitioning for
 		// concurrent users talking to same sia daemon.
 		RootDir:  creds.AccessKey,
-		TempDir:  os.Getenv("SIA_TEMP_DIR"),
 		password: os.Getenv("SIA_API_PASSWORD"),
 	}
 
@@ -129,29 +125,11 @@ func (g *Sia) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error)
 		sia.Address = "127.0.0.1:9980"
 	}
 
-	// If local Sia temp directory not specified, default to:
-	if sia.TempDir == "" {
-		sia.TempDir = ".sia_temp"
-	}
-
-	var err error
-	sia.TempDir, err = filepath.Abs(sia.TempDir)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create the temp directory with proper permissions.
-	// Ignore error when dir already exists.
-	if err = os.MkdirAll(sia.TempDir, 0700); err != nil {
-		return nil, err
-	}
-
 	colorBlue := color.New(color.FgBlue).SprintfFunc()
 	colorBold := color.New(color.Bold).SprintFunc()
 
 	log.Println(colorBlue("\nSia Gateway Configuration:"))
 	log.Println(colorBlue("  Sia Daemon API Address:") + colorBold(fmt.Sprintf(" %s\n", sia.Address)))
-	log.Println(colorBlue("  Sia Temp Directory:") + colorBold(fmt.Sprintf(" %s\n", sia.TempDir)))
 	return sia, nil
 }
 
