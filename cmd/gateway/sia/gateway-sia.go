@@ -569,7 +569,11 @@ func (s *siaObjects) GetObjectNInfo(ctx context.Context, bucket, object string, 
 	return minio.NewGetObjectReaderFromReader(pr, objInfo, opts.CheckCopyPrecondFn, pipeCloser)
 }
 
-// PutObject creates a new object with the incoming data,
+// PutObject creates a new object with the incoming data.
+// TODO (chrsch) Clarification: If the size of uploaded data is 0, can we assume this is a directory? Check S3 specification
+// TODO (chrsch) Check why file upload via aws sdk from Nextloud not working anymore even with small files ot using multipart
+// TODO (chrsch) Use context to remove already loaded data from sia, see https://medium.com/swlh/managing-groups-of-gorutines-in-go-ee7523e3eaca
+// TODO (chrsch) Support multipart upload as as soon as Sia supports it in upload stream
 func (s *siaObjects) PutObject(ctx context.Context, bucket string, object string, r *minio.PutObjReader, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
 	siaObj := path.Join(s.RootDir, bucket, object)
 
@@ -630,7 +634,7 @@ func (s *siaObjects) PutObject(ctx context.Context, bucket string, object string
 // DeleteObject deletes a blob in bucket
 func (s *siaObjects) DeleteObject(ctx context.Context, bucket string, object string) error {
 	// Tell Sia daemon to delete the object
-	var siaObj = path.Join(s.RootDir, bucket, object)
+	siaObj := path.Join(s.RootDir, bucket, object)
 	return post(s.Address, "/renter/delete/"+siaObj, "", s.password)
 }
 
@@ -638,7 +642,10 @@ func (s *siaObjects) DeleteObject(ctx context.Context, bucket string, object str
 func (s *siaObjects) DeleteObjects(ctx context.Context, bucket string, objects []string) ([]error, error) {
 	errs := make([]error, len(objects))
 
-	// TODO Implement
+	for idx, obj := range objects {
+		siaObj := path.Join(s.RootDir, bucket, obj)
+		errs[idx] = post(s.Address, "/renter/delete/"+siaObj, "", s.password)
+	}
 
 	return errs, nil
 }
