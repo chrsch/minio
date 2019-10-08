@@ -622,11 +622,20 @@ func (s *siaObjects) PutObject(ctx context.Context, bucket string, object string
 		time.Sleep(time.Second * 3)
 	}
 
+	// Check if size is 0 - If it is, this is probably a folder created
+	// If it is delete uploaded file and create folder
+	// TODO (chrsch) Check if there is a better way to identify a folder is created
+	size := r.Reader.Size()
+	if size == 0 {
+		post(s.Address, "/renter/delete/"+siaObj, "", s.password)
+		post(s.Address, "/renter/dir/"+siaObj, "action=create", s.password)
+	}
+
 	return minio.ObjectInfo{
 		Name:    object,
 		Bucket:  bucket,
 		ModTime: time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
-		Size:    r.Reader.Size(),
+		Size:    size,
 		ETag:    minio.GenETag(),
 	}, nil
 }
