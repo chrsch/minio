@@ -19,7 +19,6 @@ package sia
 import (
 	"bufio"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,7 +36,6 @@ import (
 	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/policy"
 	"github.com/minio/minio/pkg/policy/condition"
-	"github.com/minio/sha256-simd"
 )
 
 const (
@@ -289,7 +287,29 @@ func listDirs(addr string, apiPassword string, startDirectory string, obj *rente
 		return fmt.Errorf("Expecting a response, but API returned %s", resp.Status)
 	}
 
-	return json.NewDecoder(resp.Body).Decode(obj)
+	allDirectories := new(renterDirectories)
+	err = json.NewDecoder(resp.Body).Decode(allDirectories)
+
+	for _, siaDir := range allDirectories.Directories {
+		// minio-2018 is current and start dir: add it
+		// minio-2018/streaming is current and start is minio-2018: add it
+		// minio-2018/streaming is current and start dir: do not add it
+		if !strings.Contains(siaDir.SiaPath, "/") {
+			obj.Directories = append(obj.Directories, siaDir)
+		}
+		if strings.Contains(siaDir.SiaPath, "/") && siaDir.SiaPath != startDirectory {
+			obj.Directories = append(obj.Directories, siaDir)
+		}
+		if siaDir.NumSubDirs > 0 && siaDir.SiaPath != startDirectory {
+			err = listDirs(addr, apiPassword, siaDir.SiaPath, obj)
+		}
+	}
+
+	if err != nil {
+		return err
+	}
+
+	return err
 }
 
 // get makes an API call and discards the response. An error is returned if the
@@ -396,32 +416,51 @@ func (s *siaObjects) ListObjects(ctx context.Context, bucket string, prefix stri
 		return loi, siaErr
 	}
 
+	siaDirObjs, siaDirErr := s.listRenterDirectories(s.RootDir)
+	if siaDirErr != nil {
+		return loi, siaDirErr
+	}
+
 	loi.IsTruncated = false
 	loi.NextMarker = ""
 
 	root := s.RootDir + "/"
 
-	sha256sum := sha256.Sum256([]byte(path.Join(root, bucket)))
 	// FIXME(harsha) - No paginated output supported for Sia backend right now, only prefix
 	// based filtering. Once list renter files API supports paginated output we can support
 	// paginated results here as well - until then Listing is an expensive operation.
 	for _, sObj := range siaObjs {
 		name := strings.TrimPrefix(sObj.SiaPath, path.Join(root, bucket)+"/")
-		// Skip the file created specially when bucket was created.
-		if name == hex.EncodeToString(sha256sum[:]) {
+		minObj := minio.ObjectInfo{
+			Bucket: bucket,
+			Name:   name,
+			Size:   int64(sObj.Filesize),
+			IsDir:  false,
+			ModTime: func(sObj siaObjectFileInfo) time.Time {
+				value, _ := time.Parse(time.RFC3339Nano, sObj.ModTime)
+				return value
+			}(sObj),
+		}
+		if prefix == "" && !strings.Contains(name, "/") {
+			loi.Objects = append(loi.Objects, minObj)
+		}
+		if prefix != "" && strings.HasPrefix(name, prefix) {
+			loi.Objects = append(loi.Objects, minObj)
+		}
+
+	}
+
+	for _, sDirObj := range siaDirObjs {
+		if sDirObj.SiaPath == s.RootDir || sDirObj.SiaPath == s.RootDir+"/"+bucket {
 			continue
 		}
-		if strings.HasPrefix(name, prefix) {
-			loi.Objects = append(loi.Objects, minio.ObjectInfo{
-				Bucket: bucket,
-				Name:   name,
-				Size:   int64(sObj.Filesize),
-				IsDir:  false,
-				ModTime: func(sObj siaObjectFileInfo) time.Time {
-					value, _ := time.Parse(time.RFC3339Nano, sObj.ModTime)
-					return value
-				}(sObj),
-			})
+		if !strings.Contains(sDirObj.SiaPath, prefix) {
+			continue
+		}
+		name := strings.TrimPrefix(sDirObj.SiaPath, path.Join(root, bucket)+"/")
+		name = strings.TrimPrefix(name, prefix)
+		if !strings.Contains(name, "/") {
+			loi.Prefixes = append(loi.Prefixes, name)
 		}
 	}
 	return loi, nil
@@ -626,7 +665,7 @@ func (s *siaObjects) PutObject(ctx context.Context, bucket string, object string
 	// If it is delete uploaded file and create folder
 	// TODO (chrsch) Check if there is a better way to identify a folder is created
 	size := r.Reader.Size()
-	if size == 0 {
+	if size == 0 && object[len(object)-1:] == "/" {
 		post(s.Address, "/renter/delete/"+siaObj, "", s.password)
 		post(s.Address, "/renter/dir/"+siaObj, "action=create", s.password)
 	}
@@ -644,6 +683,12 @@ func (s *siaObjects) PutObject(ctx context.Context, bucket string, object string
 func (s *siaObjects) DeleteObject(ctx context.Context, bucket string, object string) error {
 	// Tell Sia daemon to delete the object
 	siaObj := path.Join(s.RootDir, bucket, object)
+
+	isDir, _ := s.isRenterDirectory(object, bucket)
+	if isDir {
+		return post(s.Address, "/renter/dir/"+siaObj, "action=delete", s.password)
+	}
+
 	return post(s.Address, "/renter/delete/"+siaObj, "", s.password)
 }
 
@@ -653,7 +698,13 @@ func (s *siaObjects) DeleteObjects(ctx context.Context, bucket string, objects [
 
 	for idx, obj := range objects {
 		siaObj := path.Join(s.RootDir, bucket, obj)
-		errs[idx] = post(s.Address, "/renter/delete/"+siaObj, "", s.password)
+
+		isDir, _ := s.isRenterDirectory(obj, bucket)
+		if isDir {
+			errs[idx] = post(s.Address, "/renter/dir/"+siaObj, "action=delete", s.password)
+		} else {
+			errs[idx] = post(s.Address, "/renter/delete/"+siaObj, "", s.password)
+		}
 	}
 
 	return errs, nil
@@ -675,6 +726,7 @@ type siaObjectFileInfo struct {
 type siaObjectDirectoryInfo struct {
 	SiaPath           string `json:"siapath"`
 	MostRecentModTime string `json:"mostrecentmodtime"`
+	NumSubDirs        int    `json:"numsubdirs"`
 }
 
 type renterFiles struct {
@@ -736,4 +788,20 @@ func (s *siaObjects) listRenterDirectories(startDirectory string) (siaObjs []sia
 	}
 
 	return siaObjs, nil
+}
+
+func (s *siaObjects) isRenterDirectory(object string, bucket string) (bool, error) {
+	// Get list of all renter directories from startDirectory
+	var rd renterDirectories
+	if err := listDirs(s.Address, s.password, s.RootDir+"/"+bucket, &rd); err != nil {
+		return false, err
+	}
+
+	for _, dir := range rd.Directories {
+		if s.RootDir+"/"+bucket+"/"+object == dir.SiaPath+"/" {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
