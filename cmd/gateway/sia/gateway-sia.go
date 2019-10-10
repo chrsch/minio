@@ -300,7 +300,9 @@ func listDirs(addr string, apiPassword string, startDirectory string, obj *rente
 		if strings.Contains(siaDir.SiaPath, "/") && siaDir.SiaPath != startDirectory {
 			obj.Directories = append(obj.Directories, siaDir)
 		}
-		if siaDir.NumSubDirs > 0 && siaDir.SiaPath != startDirectory {
+		// FIXME (chrsch) Due to a bug in the Sia renter/dir api NumSubDirs is not reported correctly.
+		//if siaDir.NumSubDirs > 0 && siaDir.SiaPath != startDirectory {
+		if siaDir.SiaPath != startDirectory {
 			err = listDirs(addr, apiPassword, siaDir.SiaPath, obj)
 		}
 	}
@@ -444,7 +446,7 @@ func (s *siaObjects) ListObjects(ctx context.Context, bucket string, prefix stri
 		if prefix == "" && !strings.Contains(name, "/") {
 			loi.Objects = append(loi.Objects, minObj)
 		}
-		if prefix != "" && strings.HasPrefix(name, prefix) {
+		if prefix != "" && strings.HasPrefix(name, prefix) && strings.Count(prefix, "/") == strings.Count(name, "/") {
 			loi.Objects = append(loi.Objects, minObj)
 		}
 
@@ -458,8 +460,8 @@ func (s *siaObjects) ListObjects(ctx context.Context, bucket string, prefix stri
 			continue
 		}
 		name := strings.TrimPrefix(sDirObj.SiaPath, path.Join(root, bucket)+"/")
-		name = strings.TrimPrefix(name, prefix)
-		if !strings.Contains(name, "/") {
+		//name = strings.TrimPrefix(name, prefix)
+		if strings.Count(prefix, "/") == strings.Count(name, "/") {
 			loi.Prefixes = append(loi.Prefixes, name)
 		}
 	}
