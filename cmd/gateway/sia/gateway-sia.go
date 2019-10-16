@@ -462,7 +462,7 @@ func (s *siaObjects) ListObjects(ctx context.Context, bucket string, prefix stri
 		name := strings.TrimPrefix(sDirObj.SiaPath, path.Join(root, bucket)+"/")
 		//name = strings.TrimPrefix(name, prefix)
 		if strings.Count(prefix, "/") == strings.Count(name, "/") {
-			loi.Prefixes = append(loi.Prefixes, name)
+			loi.Prefixes = append(loi.Prefixes, name+"/")
 		}
 	}
 	return loi, nil
